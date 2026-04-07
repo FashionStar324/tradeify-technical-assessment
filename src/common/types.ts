@@ -14,6 +14,8 @@ export interface ExecutionEvent {
   price: number;
   timestamp: string;
   execution_id: string;
+  /** Monotonically increasing per-broker sequence number for out-of-order detection */
+  seq?: number;
 }
 
 export interface PositionUpdate {
@@ -67,6 +69,11 @@ export interface AccountState {
   win_rate: number;
   risk_status: RiskStatus;
   violations: RiskViolation[];
+  /**
+   * When true, the account has hit a critical risk limit (MAX_DAILY_LOSS or
+   * TRAILING_DRAWDOWN). New execution events are rejected until manually unlocked.
+   */
+  locked: boolean;
   last_updated: string;
 }
 
@@ -87,6 +94,7 @@ export interface AccountSnapshot {
   win_rate: number;
   risk_status: RiskStatus;
   violations: string[];
+  locked: boolean;
   last_updated: string;
 }
 
@@ -151,4 +159,13 @@ export interface ReconciliationDiff {
   broker_balance: number;
   discrepancy: number;
   status: 'MATCH' | 'MISMATCH';
+}
+
+export interface ReconciliationSummary {
+  diffs: ReconciliationDiff[];
+  total_accounts: number;
+  matched: number;
+  mismatched: number;
+  result: 'PASSED' | 'FAILED';
+  timestamp: string;
 }

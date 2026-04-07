@@ -1,7 +1,3 @@
-/**
- * Problem 1 bootstrap — wires up all components and starts the simulator.
- * Used when running `npm run dev:p1` standalone (no HTTP server).
- */
 import { EventEmitter } from 'events';
 import { config } from '../common/config';
 import { logger } from '../common/logger';
@@ -15,15 +11,20 @@ export function createProblem1(bus: EventEmitter = new EventEmitter()) {
   const riskEngine = new RiskRuleEngine();
   const ingester = new EventIngester(bus, accountEngine, riskEngine);
 
+  /** Shared approximate positions for mean-reversion bias across all brokers */
+  const netPositions = new Map<string, number>();
+
   const brokerSims = config.simulator.brokers.map(
-    (broker) => new BrokerSimulator(broker, bus),
+    (broker) => new BrokerSimulator(broker, bus, netPositions),
   );
   const marketSim = new MarketPriceSimulator(bus);
+  let dailyResetTimer: ReturnType<typeof setInterval> | null = null;
 
   function start(): void {
     ingester.start();
     brokerSims.forEach((s) => s.start());
     marketSim.start();
+    scheduleDailyReset();
     logger.info('[Problem1] All simulators started');
   }
 
@@ -31,7 +32,23 @@ export function createProblem1(bus: EventEmitter = new EventEmitter()) {
     brokerSims.forEach((s) => s.stop());
     marketSim.stop();
     ingester.stop();
+    if (dailyResetTimer) clearInterval(dailyResetTimer);
     logger.info('[Problem1] Stopped');
+  }
+
+  /**
+   * Schedules a daily PnL reset at the configured market-close UTC time.
+   * Checks every minute whether it's time to reset.
+   */
+  function scheduleDailyReset(): void {
+    const [closeHour, closeMin] = config.marketCloseUtc.split(':').map(Number);
+    dailyResetTimer = setInterval(() => {
+      const now = new Date();
+      if (now.getUTCHours() === closeHour && now.getUTCMinutes() === closeMin) {
+        accountEngine.resetDaily();
+      }
+    }, 60_000);
+    if (dailyResetTimer.unref) dailyResetTimer.unref();
   }
 
   return { accountEngine, riskEngine, ingester, start, stop };
@@ -42,7 +59,11 @@ if (require.main === module) {
   const p1 = createProblem1();
 
   p1.accountEngine.on('update', (snapshot) => {
-    logger.info(`[Dashboard] ${snapshot.account_id} | PnL: ${snapshot.daily_pnl} | Pos: ${snapshot.total_net_position} | Risk: ${snapshot.risk_status}`);
+    logger.info(
+      `[Dashboard] ${snapshot.account_id} | PnL: ${snapshot.daily_pnl} | ` +
+      `Pos: ${snapshot.total_net_position} | Risk: ${snapshot.risk_status}` +
+      (snapshot.locked ? ' | LOCKED' : ''),
+    );
   });
 
   p1.riskEngine.on('violation', (msg: string) => {
@@ -51,10 +72,12 @@ if (require.main === module) {
 
   p1.start();
 
-  // Print stats every 10s
   setInterval(() => {
     const stats = p1.ingester.getStats();
-    logger.info(`[Stats] received=${stats.received} duplicates=${stats.duplicates} processed=${stats.processed}`);
+    logger.info(
+      `[Stats] received=${stats.received} duplicates=${stats.duplicates} ` +
+      `outOfOrder=${stats.outOfOrder} rejected=${stats.rejected} processed=${stats.processed}`,
+    );
   }, 10_000);
 
   process.on('SIGINT', () => {

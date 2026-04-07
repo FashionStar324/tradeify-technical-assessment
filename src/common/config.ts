@@ -4,10 +4,12 @@ export const config = {
   },
 
   risk: {
-    maxDailyLoss: -2500,       // USD — account is violated if daily_pnl drops below this
+    maxDailyLoss: -2500,       // USD — VIOLATED if daily_pnl drops at or below this
     maxPositionSize: 10,       // contracts — absolute net position across all instruments
     maxContractsPerTrade: 5,   // contracts per single execution
-    trailingDrawdown: 3000,    // USD — violation when (peak_daily_pnl - current_daily_pnl) >= this
+    trailingDrawdown: 3000,    // USD — VIOLATED when (peak_daily_pnl - daily_pnl) >= this
+    /** Fraction of each limit at which WARNING is raised (0.8 = 80%) */
+    warningThresholdRatio: 0.8,
   },
 
   simulator: {
@@ -20,6 +22,13 @@ export const config = {
     eventIntervalMs: 400,
     /** Market price tick interval (ms) */
     priceTickIntervalMs: 500,
+    /**
+     * Mean-reversion strength [0–1].
+     * At 0: fully random BUY/SELL.
+     * At 1: always trades toward flat.
+     * 0.65 gives realistic oscillation while still generating violations.
+     */
+    meanReversionStrength: 0.65,
   },
 
   /** Point value (dollars per 1-point move) per contract */
@@ -29,6 +38,9 @@ export const config = {
     MNQ: 2,
     MES: 5,
   } as Record<string, number>,
+
+  /** Market-close time in UTC for daily PnL reset (HH:MM) */
+  marketCloseUtc: '21:00',
 } as const;
 
 /** Resolve the multiplier from an instrument symbol like "NQH4" or "ESM4" */

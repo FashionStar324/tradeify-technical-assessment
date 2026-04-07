@@ -1,33 +1,33 @@
 import { logger } from '../common/logger';
-import type { AccountBalance, ReconciliationDiff } from '../common/types';
+import type { AccountBalance, ReconciliationDiff, ReconciliationSummary } from '../common/types';
 
 /**
  * Reconciles internal account balances against broker-authoritative records.
  *
- * In a real system the broker records would be fetched via API (e.g. Rithmic,
- * Interactive Brokers). Here we simulate a broker response with a small
- * random variance to demonstrate discrepancy detection.
+ * In production, broker records would be fetched via API (Rithmic, IBKR, etc.).
+ * Here we accept an optional override map for testing; without it the comparison
+ * is identity (all accounts match), which is the correct post-remediation baseline.
  */
 export class ReconciliationEngine {
   /**
    * Compares internal balances against broker-reported balances.
-   * Returns a diff report for each account.
+   * Returns a structured summary with PASSED / FAILED overall result.
+   *
+   * @param internalBalances  Balances from the internal ledger
+   * @param brokerOverrides   Optional map of account_id → broker balance.
+   *                          Accounts missing from this map are treated as matching.
    */
   reconcile(
     internalBalances: AccountBalance[],
     brokerOverrides?: Map<string, number>,
-  ): ReconciliationDiff[] {
+  ): ReconciliationSummary {
+    const tolerance = 0.01; // $0.01 floating-point tolerance
     const diffs: ReconciliationDiff[] = [];
-    const tolerance = 0.01; // $0.01 — floating point tolerance
 
     for (const internal of internalBalances) {
-      // Use provided override (real broker value) or simulate
-      const brokerBalance =
-        brokerOverrides?.get(internal.account_id) ?? internal.balance;
-      const discrepancy = parseFloat(
-        (brokerBalance - internal.balance).toFixed(2),
-      );
-      const status = Math.abs(discrepancy) <= tolerance ? 'MATCH' : 'MISMATCH';
+      const brokerBalance = brokerOverrides?.get(internal.account_id) ?? internal.balance;
+      const discrepancy = parseFloat((brokerBalance - internal.balance).toFixed(2));
+      const status: 'MATCH' | 'MISMATCH' = Math.abs(discrepancy) <= tolerance ? 'MATCH' : 'MISMATCH';
 
       diffs.push({
         account_id: internal.account_id,
@@ -39,23 +39,33 @@ export class ReconciliationEngine {
 
       if (status === 'MISMATCH') {
         logger.warn(
-          `[ReconciliationEngine] MISMATCH on ${internal.account_id}: ` +
+          `[ReconciliationEngine] MISMATCH ${internal.account_id}: ` +
           `internal=${internal.balance.toFixed(2)} broker=${brokerBalance.toFixed(2)} ` +
-          `discrepancy=${discrepancy}`,
+          `diff=${discrepancy}`,
         );
       } else {
-        logger.info(
-          `[ReconciliationEngine] ${internal.account_id} OK — balance=${internal.balance.toFixed(2)}`,
-        );
+        logger.info(`[ReconciliationEngine] MATCH ${internal.account_id} @ ${internal.balance.toFixed(2)}`);
       }
     }
 
-    const mismatches = diffs.filter((d) => d.status === 'MISMATCH');
+    const mismatched = diffs.filter((d) => d.status === 'MISMATCH').length;
+    const matched = diffs.length - mismatched;
+    const result: 'PASSED' | 'FAILED' = mismatched === 0 ? 'PASSED' : 'FAILED';
+
+    const summary: ReconciliationSummary = {
+      diffs,
+      total_accounts: diffs.length,
+      matched,
+      mismatched,
+      result,
+      timestamp: new Date().toISOString(),
+    };
+
     logger.info(
-      `[ReconciliationEngine] Reconciliation complete: ` +
-      `${diffs.length - mismatches.length} match, ${mismatches.length} mismatch`,
+      `[ReconciliationEngine] Reconciliation ${result}: ` +
+      `${matched} match, ${mismatched} mismatch`,
     );
 
-    return diffs;
+    return summary;
   }
 }

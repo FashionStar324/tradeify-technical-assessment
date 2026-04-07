@@ -10,15 +10,17 @@ import type { BrokerEvent } from '../common/types';
  * deduplicates execution events, routes them to the AccountStateEngine,
  * and triggers risk evaluation after every state mutation.
  *
- * Out-of-order handling: events carry an ISO timestamp. If an execution
- * event arrives with a timestamp older than the account's last_updated,
- * we still process it (idempotency is guaranteed by execution_id dedup)
- * but log a warning. Full replay-based ordering would require a
- * persistent event log (see architecture notes).
+ * Out-of-order detection: sequence numbers from the broker are tracked per
+ * (broker, account_id). A gap or regression in the sequence is logged as a
+ * warning. Events are still processed (idempotency is guaranteed by
+ * execution_id dedup) — full causal ordering would require a persistent
+ * event log partitioned by account_id.
  */
 export class EventIngester {
   private readonly dedup = new EventDeduplicator();
-  private stats = { received: 0, duplicates: 0, processed: 0 };
+  /** broker:account_id → last seen seq */
+  private readonly seqTracker = new Map<string, number>();
+  private stats = { received: 0, duplicates: 0, outOfOrder: 0, rejected: 0, processed: 0 };
 
   constructor(
     private readonly bus: EventEmitter,
@@ -46,15 +48,20 @@ export class EventIngester {
     switch (event.type) {
       case 'execution': {
         const { payload } = event;
+
         if (!this.dedup.isNew(payload.execution_id)) {
           this.stats.duplicates++;
-          logger.debug(
-            `[EventIngester] Duplicate execution ignored: ${payload.execution_id}`,
-          );
+          logger.debug(`[EventIngester] Duplicate ignored: ${payload.execution_id}`);
           return;
         }
 
-        this.accountEngine.handleExecution(payload);
+        this.checkSequence(payload.broker, payload.account_id, payload.seq);
+
+        const accepted = this.accountEngine.handleExecution(payload);
+        if (!accepted) {
+          this.stats.rejected++;
+          return;
+        }
 
         const state = this.accountEngine.getAccount(payload.account_id);
         if (state) this.riskEngine.evaluate(state, payload);
@@ -73,7 +80,6 @@ export class EventIngester {
 
       case 'market': {
         this.accountEngine.handleMarketPrice(event.payload);
-        // Re-evaluate all accounts on price change (unrealized PnL changes)
         for (const state of this.accountEngine.getAllAccounts()) {
           this.riskEngine.evaluate(state);
         }
@@ -81,5 +87,26 @@ export class EventIngester {
         break;
       }
     }
+  }
+
+  private checkSequence(broker: string, accountId: string, seq?: number): void {
+    if (seq === undefined) return;
+    const key = `${broker}:${accountId}`;
+    const last = this.seqTracker.get(key);
+
+    if (last !== undefined && seq <= last) {
+      this.stats.outOfOrder++;
+      logger.warn(
+        `[EventIngester] Out-of-order event from ${broker} for ${accountId}: ` +
+        `expected >${last}, got ${seq}`,
+      );
+    } else if (last !== undefined && seq > last + 1) {
+      logger.warn(
+        `[EventIngester] Sequence gap from ${broker} for ${accountId}: ` +
+        `last=${last}, received=${seq} (missed ${seq - last - 1} events)`,
+      );
+    }
+
+    this.seqTracker.set(key, seq);
   }
 }

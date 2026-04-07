@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import { z } from 'zod';
 import { logger } from '../common/logger';
 import { AuditLogger } from './AuditLogger';
 import { calculateTradePnL, isInOutageWindow } from './PnLCalculator';
@@ -12,7 +13,19 @@ import type {
 export interface RemediationOptions {
   /** When true, compute and log but do NOT mutate balances or mark trades */
   dryRun?: boolean;
+  /** Directory to persist the audit log as NDJSON (omit = in-memory only) */
+  auditLogDir?: string;
 }
+
+// ─── Input validation ─────────────────────────────────────────────────────────
+
+const IsoDateSchema = z.string().datetime({ message: 'Must be an ISO 8601 UTC timestamp' });
+
+const OutageWindowSchema = z
+  .object({ start: IsoDateSchema, end: IsoDateSchema })
+  .refine((w) => new Date(w.start) < new Date(w.end), {
+    message: 'Outage window start must be before end',
+  });
 
 /**
  * Orchestrates the brokerage outage remediation process.
@@ -21,16 +34,20 @@ export interface RemediationOptions {
  *   1. Idempotency  — trades already marked `remediated` are skipped.
  *   2. No double    — each trade carries its remediation_run_id once processed.
  *   3. Audit trail  — every action is written to the AuditLogger before
- *                     any balance mutation occurs (WAL-like pattern).
- *   4. Determinism  — given the same input set, reruns produce the same output.
+ *                     any balance mutation occurs (WAL pattern).
+ *   4. Determinism  — given the same input, reruns produce the same output.
+ *   5. Input safety — outage window and trade data are validated before processing.
  */
 export class RemediationEngine {
-  private readonly auditLogger = new AuditLogger();
+  private readonly auditLogger: AuditLogger;
 
   constructor(
     private trades: TradeRecord[],
     private balances: AccountBalance[],
-  ) {}
+    options: RemediationOptions = {},
+  ) {
+    this.auditLogger = new AuditLogger(options.auditLogDir);
+  }
 
   async run(
     windowStart: string,
@@ -40,14 +57,30 @@ export class RemediationEngine {
     const runId = uuidv4();
     const dryRun = options.dryRun ?? false;
 
+    // ── Validate inputs ───────────────────────────────────────────────────────
+    const windowResult = OutageWindowSchema.safeParse({ start: windowStart, end: windowEnd });
+    if (!windowResult.success) {
+      const msg = windowResult.error.issues.map((i) => i.message).join('; ');
+      throw new Error(`Invalid outage window: ${msg}`);
+    }
+
     logger.info(
       `[RemediationEngine] Starting run ${runId} | window: ${windowStart} → ${windowEnd} | dryRun=${dryRun}`,
     );
 
-    // ── Step 1: Identify impacted trades ─────────────────────────────────────
-    const impacted = this.trades.filter((t) =>
-      isInOutageWindow(t, windowStart, windowEnd),
-    );
+    // ── Step 1: Identify impacted trades ──────────────────────────────────────
+    const impacted = this.trades.filter((t) => {
+      // Skip data integrity issues
+      if (t.qty <= 0) {
+        logger.warn(`[RemediationEngine] Skipping trade ${t.trade_id}: invalid qty=${t.qty}`);
+        return false;
+      }
+      if (t.entry_price <= 0 || t.exit_price <= 0) {
+        logger.warn(`[RemediationEngine] Skipping trade ${t.trade_id}: non-positive price`);
+        return false;
+      }
+      return isInOutageWindow(t, windowStart, windowEnd);
+    });
 
     this.auditLogger.log({
       run_id: runId,
@@ -91,7 +124,6 @@ export class RemediationEngine {
       }
 
       if (pnl >= 0) {
-        // Profitable trade — leave untouched
         results.push({
           trade_id: trade.trade_id,
           account_id: trade.account_id,
@@ -112,7 +144,7 @@ export class RemediationEngine {
       }
 
       // Losing trade — reverse it
-      const balanceAdjustment = -pnl; // positive amount to restore
+      const balanceAdjustment = -pnl;
 
       // Write audit entry BEFORE mutation (WAL pattern)
       this.auditLogger.log({
@@ -130,11 +162,8 @@ export class RemediationEngine {
       });
 
       if (!dryRun) {
-        // Mark trade as remediated
         trade.remediated = true;
         trade.remediation_run_id = runId;
-
-        // Adjust account balance
         this.adjustBalance(trade.account_id, balanceAdjustment, runId);
       }
 
@@ -155,7 +184,9 @@ export class RemediationEngine {
 
     // ── Step 4: Build report ──────────────────────────────────────────────────
     const remediated = results.filter((r) => r.remediated);
-    const profitable = results.filter((r) => (r.pnl ?? 0) >= 0 && !r.remediated && !r.skipped_reason?.includes('Already'));
+    const profitable = results.filter(
+      (r) => (r.pnl ?? 0) >= 0 && !r.skipped_reason?.includes('Already'),
+    );
     const totalAdjustment = remediated.reduce((sum, r) => sum + r.balance_adjustment, 0);
     const accountsImpacted = [...new Set(remediated.map((r) => r.account_id))];
 
@@ -174,6 +205,10 @@ export class RemediationEngine {
 
     this.printReport(report);
     return report;
+  }
+
+  getTrades(): Readonly<TradeRecord[]> {
+    return this.trades;
   }
 
   getAuditLog(): ReturnType<AuditLogger['getAll']> {
