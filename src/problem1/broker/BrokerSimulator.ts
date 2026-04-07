@@ -4,20 +4,16 @@ import { config } from '../../common/config';
 import { logger } from '../../common/logger';
 import type { BrokerEvent, ExecutionEvent, MarketPriceFeed, Side } from '../../common/types';
 
-/** Mid prices per instrument — updated by market simulator */
-const marketPrices: Record<string, number> = {
-  NQH4: 18200,
-  ESM4: 5200,
-  NQM4: 18210,
-  ESH4: 5195,
-};
-
 /**
  * Simulates a single broker's execution event stream.
  *
  * Mean-reversion bias: when an account already has a large position in one
  * direction, the simulator prefers the opposite side, keeping positions
  * realistic rather than growing unboundedly.
+ *
+ * Receives a live read-only reference to the shared price book so that
+ * executions always reflect the latest market prices emitted by
+ * MarketPriceSimulator.
  */
 export class BrokerSimulator {
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -29,6 +25,8 @@ export class BrokerSimulator {
     private readonly bus: EventEmitter,
     /** Approximate net position per account (used for mean-reversion bias) */
     private readonly netPositions: Map<string, number>,
+    /** Live read-only view of current market prices — owned by MarketPriceSimulator */
+    private readonly prices: Readonly<Record<string, number>>,
   ) {}
 
   start(): void {
@@ -48,7 +46,7 @@ export class BrokerSimulator {
     const account_id = randomPick(config.simulator.accounts);
     const side = this.chooseSide(account_id);
     const qty = randomInt(1, config.risk.maxContractsPerTrade);
-    const midPrice = marketPrices[instrument] ?? 1000;
+    const midPrice = this.prices[instrument] ?? 1000;
     const slippage = (Math.random() - 0.5) * 2; // ±1 tick slippage
     const price = parseFloat((midPrice + slippage).toFixed(2));
 
@@ -113,9 +111,25 @@ export class BrokerSimulator {
 
 /**
  * Emits periodic market price ticks for all instruments.
+ * Owns the authoritative price book — BrokerSimulators receive a live
+ * reference via `MarketPriceSimulator.prices` so their fills always
+ * reflect the latest mid prices.
  */
 export class MarketPriceSimulator {
   private timer: ReturnType<typeof setInterval> | null = null;
+
+  /**
+   * Live price book. Exposed as a readonly-typed public field so that
+   * BrokerSimulator instances can hold a reference and always read the
+   * latest values without a copy, while callers outside this module
+   * cannot accidentally mutate it.
+   */
+  readonly prices: Record<string, number> = {
+    NQH4: 18200,
+    ESM4: 5200,
+    NQM4: 18210,
+    ESH4: 5195,
+  };
 
   constructor(private readonly bus: EventEmitter) {}
 
@@ -131,18 +145,20 @@ export class MarketPriceSimulator {
     }
   }
 
+  /** Returns a snapshot copy of the current prices (not a live reference). */
   getPrices(): Readonly<Record<string, number>> {
-    return { ...marketPrices };
+    return { ...this.prices };
   }
 
   private tick(): void {
     for (const instrument of config.simulator.instruments) {
-      const current = marketPrices[instrument] ?? 1000;
-      marketPrices[instrument] = parseFloat((current + (Math.random() - 0.5)).toFixed(2));
+      const current = this.prices[instrument] ?? 1000;
+      const newPrice = parseFloat((current + (Math.random() - 0.5)).toFixed(2));
+      this.prices[instrument] = newPrice;
 
       const feed: MarketPriceFeed = {
         instrument,
-        price: marketPrices[instrument],
+        price: newPrice,
         timestamp: new Date().toISOString(),
       };
       this.bus.emit('event', { type: 'market', payload: feed } satisfies BrokerEvent);

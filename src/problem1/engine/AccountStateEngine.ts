@@ -118,7 +118,9 @@ export class AccountStateEngine extends EventEmitter {
   }
 
   handleMarketPrice(feed: MarketPriceFeed): void {
-    let changed = false;
+    // Track only accounts whose unrealized PnL actually changed so we don't
+    // broadcast O(all accounts) snapshots on every tick regardless of exposure.
+    const changedIds = new Set<string>();
 
     for (const state of this.accounts.values()) {
       const pos = state.positions[feed.instrument];
@@ -129,15 +131,15 @@ export class AccountStateEngine extends EventEmitter {
 
       if (newUnrealized !== pos.unrealized_pnl) {
         pos.unrealized_pnl = newUnrealized;
-        changed = true;
+        changedIds.add(state.account_id);
       }
     }
 
-    if (changed) {
-      for (const state of this.accounts.values()) {
-        this.updateDailyPnL(state);
-        this.emit('update', this.toSnapshot(state));
-      }
+    for (const accountId of changedIds) {
+      const state = this.accounts.get(accountId);
+      if (!state) continue;
+      this.updateDailyPnL(state);
+      this.emit('update', this.toSnapshot(state));
     }
   }
 
@@ -179,38 +181,40 @@ export class AccountStateEngine extends EventEmitter {
   // ─── Internal helpers ──────────────────────────────────────────────────────
 
   private getOrCreate(accountId: string): AccountState {
-    if (!this.accounts.has(accountId)) {
-      this.accounts.set(accountId, {
-        account_id: accountId,
-        positions: {},
-        total_net_position: 0,
-        realized_pnl: 0,
-        unrealized_pnl: 0,
-        daily_pnl: 0,
-        peak_daily_pnl: 0,
-        trade_count: 0,
-        winning_trades: 0,
-        win_rate: 0,
-        risk_status: 'OK',
-        violations: [],
-        locked: false,
-        last_updated: new Date().toISOString(),
-      });
-    }
-    return this.accounts.get(accountId)!;
+    const existing = this.accounts.get(accountId);
+    if (existing) return existing;
+    const state: AccountState = {
+      account_id: accountId,
+      positions: {},
+      total_net_position: 0,
+      realized_pnl: 0,
+      unrealized_pnl: 0,
+      daily_pnl: 0,
+      peak_daily_pnl: 0,
+      trade_count: 0,
+      winning_trades: 0,
+      win_rate: 0,
+      risk_status: 'OK',
+      violations: [],
+      locked: false,
+      last_updated: new Date().toISOString(),
+    };
+    this.accounts.set(accountId, state);
+    return state;
   }
 
   private getOrCreatePosition(state: AccountState, instrument: string): InstrumentPosition {
-    if (!state.positions[instrument]) {
-      state.positions[instrument] = {
-        instrument,
-        position_qty: 0,
-        avg_price: 0,
-        realized_pnl: 0,
-        unrealized_pnl: 0,
-      };
-    }
-    return state.positions[instrument];
+    const existing = state.positions[instrument];
+    if (existing) return existing;
+    const pos: InstrumentPosition = {
+      instrument,
+      position_qty: 0,
+      avg_price: 0,
+      realized_pnl: 0,
+      unrealized_pnl: 0,
+    };
+    state.positions[instrument] = pos;
+    return pos;
   }
 
   private updateDailyPnL(state: AccountState): void {

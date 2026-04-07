@@ -49,11 +49,11 @@ export class RemediationEngine {
     this.auditLogger = new AuditLogger(options.auditLogDir);
   }
 
-  async run(
+  run(
     windowStart: string,
     windowEnd: string,
     options: RemediationOptions = {},
-  ): Promise<RemediationReport> {
+  ): RemediationReport {
     const runId = uuidv4();
     const dryRun = options.dryRun ?? false;
 
@@ -207,7 +207,7 @@ export class RemediationEngine {
     return report;
   }
 
-  getTrades(): Readonly<TradeRecord[]> {
+  getTrades(): ReadonlyArray<Readonly<TradeRecord>> {
     return this.trades;
   }
 

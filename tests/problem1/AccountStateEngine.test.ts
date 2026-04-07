@@ -121,10 +121,11 @@ describe('AccountStateEngine', () => {
     });
 
     it('unlockAccount clears the lock', () => {
-      const state = engine.getAccount('TRD-TEST') ?? (engine.handleExecution(makeExecution()), engine.getAccount('TRD-TEST')!);
+      engine.handleExecution(makeExecution());
+      const state = engine.getAccount('TRD-TEST')!;
       state.locked = true;
       engine.unlockAccount('TRD-TEST');
-      expect(engine.getAccount('TRD-TEST')!.locked).toBe(false);
+      expect(state.locked).toBe(false);
     });
   });
 

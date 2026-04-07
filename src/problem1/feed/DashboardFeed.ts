@@ -47,20 +47,16 @@ export class DashboardFeed {
 
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
-  /** Injected getter to retrieve the current snapshot of any account */
-  private getSnapshot: ((id: string) => AccountSnapshot | undefined) | null = null;
-  private getAllSnapshots: (() => AccountSnapshot[]) | null = null;
-
   attach(
     server: Server,
     getSnapshot: (id: string) => AccountSnapshot | undefined,
     getAllSnapshots: () => AccountSnapshot[],
   ): void {
-    this.getSnapshot = getSnapshot;
-    this.getAllSnapshots = getAllSnapshots;
-
     this.wss = new WebSocketServer({ server, path: '/ws' });
 
+    // getSnapshot and getAllSnapshots are closed over here rather than stored as
+    // nullable class fields — this removes the need for null-guards on every call
+    // site and makes it impossible to call handleMessage before attach().
     this.wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
       const ip = req.socket.remoteAddress ?? 'unknown';
       logger.info(`[DashboardFeed] Client connected from ${ip}`);
@@ -68,7 +64,9 @@ export class DashboardFeed {
       this.alive.set(ws, true);
 
       ws.on('pong', () => this.alive.set(ws, true));
-      ws.on('message', (raw) => this.handleMessage(ws, raw.toString()));
+      ws.on('message', (raw) =>
+        this.handleMessage(ws, raw.toString(), getSnapshot, getAllSnapshots),
+      );
       ws.on('close', () => {
         this.subscriptions.delete(ws);
         this.alive.delete(ws);
@@ -119,7 +117,12 @@ export class DashboardFeed {
     this.pending.clear();
   }
 
-  private handleMessage(ws: WebSocket, raw: string): void {
+  private handleMessage(
+    ws: WebSocket,
+    raw: string,
+    getSnapshot: (id: string) => AccountSnapshot | undefined,
+    getAllSnapshots: () => AccountSnapshot[],
+  ): void {
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw);
@@ -140,22 +143,16 @@ export class DashboardFeed {
     if (msg.subscribe === 'ALL') {
       subs.add('*');
       this.send(ws, { type: 'subscribed', account_ids: ['ALL'] });
-      // Send full current state immediately
-      if (this.getAllSnapshots) {
-        for (const snap of this.getAllSnapshots()) {
-          this.send(ws, { type: 'snapshot', data: snap });
-        }
+      for (const snap of getAllSnapshots()) {
+        this.send(ws, { type: 'snapshot', data: snap });
       }
     } else {
       const ids = msg.subscribe;
       ids.forEach((id) => subs.add(id));
       this.send(ws, { type: 'subscribed', account_ids: ids });
-      // Send current state for each subscribed account immediately
-      if (this.getSnapshot) {
-        for (const id of ids) {
-          const snap = this.getSnapshot(id);
-          if (snap) this.send(ws, { type: 'snapshot', data: snap });
-        }
+      for (const id of ids) {
+        const snap = getSnapshot(id);
+        if (snap) this.send(ws, { type: 'snapshot', data: snap });
       }
     }
   }

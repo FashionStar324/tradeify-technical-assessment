@@ -7,21 +7,26 @@ import type { AuditEntry } from '../common/types';
 /**
  * Append-only audit log with optional file persistence.
  *
- * Each entry is written as a newline-delimited JSON (NDJSON) record before
- * any balance mutation takes place (write-ahead log pattern).
+ * Each entry is written as a newline-delimited JSON (NDJSON) record.
+ * File I/O uses a WriteStream (non-blocking, OS-buffered) rather than
+ * appendFileSync to avoid stalling the Node.js event loop on every write.
  *
  * In production, this would write to a database or object store instead.
  */
 export class AuditLogger {
   private readonly entries: AuditEntry[] = [];
-  private readonly filePath: string | null;
+  private readonly writeStream: fs.WriteStream | null;
 
   constructor(logDir?: string) {
     if (logDir) {
       fs.mkdirSync(logDir, { recursive: true });
-      this.filePath = path.join(logDir, 'audit.ndjson');
+      const filePath = path.join(logDir, 'audit.ndjson');
+      this.writeStream = fs.createWriteStream(filePath, { flags: 'a' });
+      this.writeStream.on('error', (err) => {
+        logger.error(`[AuditLogger] Write stream error: ${String(err)}`);
+      });
     } else {
-      this.filePath = null;
+      this.writeStream = null;
     }
   }
 
@@ -33,17 +38,18 @@ export class AuditLogger {
     };
     this.entries.push(full);
 
-    // Persist before returning — WAL guarantee
-    if (this.filePath) {
-      try {
-        fs.appendFileSync(this.filePath, JSON.stringify(full) + '\n', 'utf8');
-      } catch (err) {
-        logger.error(`[AuditLogger] Failed to write to ${this.filePath}: ${String(err)}`);
-      }
-    }
+    // Non-blocking write — the OS stream buffer absorbs bursts without
+    // stalling the event loop. Back-pressure is handled automatically
+    // by Node's stream internals.
+    this.writeStream?.write(JSON.stringify(full) + '\n');
 
     logger.debug(`[Audit] ${full.action} ${full.entity_type}:${full.entity_id}`);
     return full;
+  }
+
+  /** Flush and close the underlying file stream (call on graceful shutdown). */
+  close(): void {
+    this.writeStream?.end();
   }
 
   getAll(): Readonly<AuditEntry[]> {

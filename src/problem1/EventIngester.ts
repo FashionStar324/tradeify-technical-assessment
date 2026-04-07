@@ -22,6 +22,10 @@ export class EventIngester {
   private readonly seqTracker = new Map<string, number>();
   private stats = { received: 0, duplicates: 0, outOfOrder: 0, rejected: 0, processed: 0 };
 
+  // Stored so we can remove exactly this listener in stop() without
+  // accidentally clearing other components' handlers on the same bus.
+  private readonly busHandler = (event: BrokerEvent) => this.handle(event);
+
   constructor(
     private readonly bus: EventEmitter,
     private readonly accountEngine: AccountStateEngine,
@@ -29,12 +33,12 @@ export class EventIngester {
   ) {}
 
   start(): void {
-    this.bus.on('event', (event: BrokerEvent) => this.handle(event));
+    this.bus.on('event', this.busHandler);
     logger.info('[EventIngester] Listening for broker events');
   }
 
   stop(): void {
-    this.bus.removeAllListeners('event');
+    this.bus.off('event', this.busHandler);
     this.dedup.stop();
   }
 

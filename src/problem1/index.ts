@@ -14,10 +14,13 @@ export function createProblem1(bus: EventEmitter = new EventEmitter()) {
   /** Shared approximate positions for mean-reversion bias across all brokers */
   const netPositions = new Map<string, number>();
 
-  const brokerSims = config.simulator.brokers.map(
-    (broker) => new BrokerSimulator(broker, bus, netPositions),
-  );
+  // MarketPriceSimulator owns the price book. BrokerSimulators receive the
+  // live reference so their fills always reflect the latest mid prices without
+  // copying. Create marketSim first so the reference is available.
   const marketSim = new MarketPriceSimulator(bus);
+  const brokerSims = config.simulator.brokers.map(
+    (broker) => new BrokerSimulator(broker, bus, netPositions, marketSim.prices),
+  );
   let dailyResetTimer: ReturnType<typeof setInterval> | null = null;
 
   function start(): void {

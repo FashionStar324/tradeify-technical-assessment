@@ -6,7 +6,7 @@ import { EventEmitter } from 'events';
 import { AccountStateEngine } from '../../src/problem1/engine/AccountStateEngine';
 import { RiskRuleEngine } from '../../src/problem1/engine/RiskRuleEngine';
 import { EventIngester } from '../../src/problem1/EventIngester';
-import type { BrokerEvent } from '../../src/common/types';
+import type { BrokerEvent, ExecutionEvent } from '../../src/common/types';
 
 function buildPipeline() {
   const bus = new EventEmitter();
@@ -17,7 +17,7 @@ function buildPipeline() {
   return { bus, accountEngine, riskEngine, ingester };
 }
 
-function execEvent(overrides: Partial<Parameters<typeof Object.assign>[1]> = {}): BrokerEvent {
+function execEvent(overrides: Partial<ExecutionEvent> = {}): BrokerEvent {
   return {
     type: 'execution',
     payload: {
@@ -35,82 +35,80 @@ function execEvent(overrides: Partial<Parameters<typeof Object.assign>[1]> = {})
 }
 
 describe('Problem 1 — full pipeline integration', () => {
+  // Each test gets its own pipeline; afterEach stops the ingester to clean up
+  // the EventDeduplicator's eviction timer so Jest has no open handles.
+  let pipeline: ReturnType<typeof buildPipeline>;
+
+  beforeEach(() => {
+    pipeline = buildPipeline();
+  });
+
   afterEach(() => {
+    pipeline.ingester.stop();
     jest.restoreAllMocks();
   });
 
   it('execution event flows through to account state', () => {
-    const { bus, accountEngine } = buildPipeline();
+    pipeline.bus.emit('event', execEvent());
 
-    bus.emit('event', execEvent());
-
-    const state = accountEngine.getAccount('TRD-INT');
+    const state = pipeline.accountEngine.getAccount('TRD-INT');
     expect(state).toBeDefined();
     expect(state!.positions['NQH4']?.position_qty).toBe(1);
   });
 
   it('duplicate execution is ignored', () => {
-    const { bus, accountEngine, ingester } = buildPipeline();
     const event = execEvent({ execution_id: 'dup-001' });
 
-    bus.emit('event', event);
-    bus.emit('event', event); // duplicate
+    pipeline.bus.emit('event', event);
+    pipeline.bus.emit('event', event); // duplicate
 
-    expect(ingester.getStats().duplicates).toBe(1);
-    expect(accountEngine.getAccount('TRD-INT')!.positions['NQH4']?.position_qty).toBe(1);
+    expect(pipeline.ingester.getStats().duplicates).toBe(1);
+    expect(pipeline.accountEngine.getAccount('TRD-INT')!.positions['NQH4']?.position_qty).toBe(1);
   });
 
   it('market price event updates unrealized PnL', () => {
-    const { bus, accountEngine } = buildPipeline();
-
-    bus.emit('event', execEvent({ qty: 2, price: 18200 }));
-    bus.emit('event', {
+    pipeline.bus.emit('event', execEvent({ qty: 2, price: 18200 }));
+    pipeline.bus.emit('event', {
       type: 'market',
       payload: { instrument: 'NQH4', price: 18250, timestamp: new Date().toISOString() },
     } satisfies BrokerEvent);
 
     // 2 * (18250 - 18200) * 20 = 2000
-    expect(accountEngine.getAccount('TRD-INT')!.unrealized_pnl).toBeCloseTo(2000);
+    expect(pipeline.accountEngine.getAccount('TRD-INT')!.unrealized_pnl).toBeCloseTo(2000);
   });
 
   it('risk violation fires when position exceeds limit', () => {
-    const { bus, riskEngine } = buildPipeline();
     const violations: string[] = [];
-    riskEngine.on('violation', (msg: string) => violations.push(msg));
+    pipeline.riskEngine.on('violation', (msg: string) => violations.push(msg));
 
     // Add 11 contracts across separate trades
     for (let i = 0; i < 11; i++) {
-      bus.emit('event', execEvent({ execution_id: `e-${i}`, qty: 1, side: 'BUY' }));
+      pipeline.bus.emit('event', execEvent({ execution_id: `e-${i}`, qty: 1, side: 'BUY' }));
     }
 
     expect(violations.some((v) => v.includes('MAX POSITION SIZE'))).toBe(true);
   });
 
   it('account is locked after MAX_DAILY_LOSS violation', () => {
-    const { bus, accountEngine, riskEngine } = buildPipeline();
-
-    // Manually put account into loss beyond limit
-    bus.emit('event', execEvent());
-    const state = accountEngine.getAccount('TRD-INT')!;
+    pipeline.bus.emit('event', execEvent());
+    const state = pipeline.accountEngine.getAccount('TRD-INT')!;
     state.daily_pnl = -2600;
     state.peak_daily_pnl = -2600;
-    riskEngine.evaluate(state);
+    pipeline.riskEngine.evaluate(state);
 
     expect(state.locked).toBe(true);
 
     // Further executions should be rejected
-    const stats_before = accountEngine.getAllAccounts()[0]!.trade_count;
-    bus.emit('event', execEvent({ execution_id: 'should-be-rejected' }));
-    expect(accountEngine.getAccount('TRD-INT')!.trade_count).toBe(stats_before);
+    const statsBefore = pipeline.accountEngine.getAllAccounts()[0]!.trade_count;
+    pipeline.bus.emit('event', execEvent({ execution_id: 'should-be-rejected' }));
+    expect(pipeline.accountEngine.getAccount('TRD-INT')!.trade_count).toBe(statsBefore);
   });
 
   it('position update from broker reconciles state', () => {
-    const { bus, accountEngine } = buildPipeline();
-
-    bus.emit('event', execEvent({ qty: 3 }));
+    pipeline.bus.emit('event', execEvent({ qty: 3 }));
 
     // Broker says position is 5 (authoritative)
-    bus.emit('event', {
+    pipeline.bus.emit('event', {
       type: 'position',
       payload: {
         broker: 'Broker_A',
@@ -122,31 +120,29 @@ describe('Problem 1 — full pipeline integration', () => {
       },
     } satisfies BrokerEvent);
 
-    const pos = accountEngine.getAccount('TRD-INT')!.positions['NQH4'];
+    const pos = pipeline.accountEngine.getAccount('TRD-INT')!.positions['NQH4'];
     expect(pos?.position_qty).toBe(5);
     expect(pos?.avg_price).toBe(18190);
   });
 
   it('ingester stats correctly count processed vs duplicates vs rejected', () => {
-    const { bus, accountEngine, ingester } = buildPipeline();
-
     // 3 unique executions
-    bus.emit('event', execEvent({ execution_id: 'u1' }));
-    bus.emit('event', execEvent({ execution_id: 'u2' }));
-    bus.emit('event', execEvent({ execution_id: 'u3' }));
+    pipeline.bus.emit('event', execEvent({ execution_id: 'u1' }));
+    pipeline.bus.emit('event', execEvent({ execution_id: 'u2' }));
+    pipeline.bus.emit('event', execEvent({ execution_id: 'u3' }));
     // 1 duplicate
-    bus.emit('event', execEvent({ execution_id: 'u1' }));
+    pipeline.bus.emit('event', execEvent({ execution_id: 'u1' }));
     // 1 market tick
-    bus.emit('event', {
+    pipeline.bus.emit('event', {
       type: 'market',
       payload: { instrument: 'NQH4', price: 18200, timestamp: new Date().toISOString() },
     } satisfies BrokerEvent);
 
     // Lock the account and send one more — should be rejected
-    accountEngine.getAccount('TRD-INT')!.locked = true;
-    bus.emit('event', execEvent({ execution_id: 'u4' }));
+    pipeline.accountEngine.getAccount('TRD-INT')!.locked = true;
+    pipeline.bus.emit('event', execEvent({ execution_id: 'u4' }));
 
-    const stats = ingester.getStats();
+    const stats = pipeline.ingester.getStats();
     expect(stats.duplicates).toBe(1);
     expect(stats.rejected).toBe(1);
     // processed = 3 unique execs + 1 market tick (locked exec is rejected, not processed)

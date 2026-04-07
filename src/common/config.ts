@@ -37,7 +37,7 @@ export const config = {
     ES: 50,
     MNQ: 2,
     MES: 5,
-  } as Record<string, number>,
+  } satisfies Record<string, number>,
 
   /** Market-close time in UTC for daily PnL reset (HH:MM) */
   marketCloseUtc: '21:00',
@@ -45,9 +45,10 @@ export const config = {
 
 /** Resolve the multiplier from an instrument symbol like "NQH4" or "ESM4" */
 export function getContractMultiplier(instrument: string): number {
-  const prefix = instrument.replace(/[^A-Z]/g, '').replace(/\d/g, '');
-  // Try longest match first (MNQ before NQ)
-  const sorted = Object.entries(config.contractMultipliers).sort(
+  // Strip everything that isn't an uppercase letter to isolate the root symbol
+  const prefix = instrument.replace(/[^A-Z]/g, '');
+  // Try longest match first (MNQ before NQ) to prevent short prefixes shadowing longer ones
+  const sorted = (Object.entries(config.contractMultipliers) as [string, number][]).sort(
     ([a], [b]) => b.length - a.length,
   );
   for (const [key, value] of sorted) {
