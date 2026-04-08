@@ -39,9 +39,12 @@ export class AuditLogger {
     this.entries.push(full);
 
     // Non-blocking write — the OS stream buffer absorbs bursts without
-    // stalling the event loop. Back-pressure is handled automatically
-    // by Node's stream internals.
-    this.writeStream?.write(JSON.stringify(full) + '\n');
+    // stalling the event loop. A false return signals back-pressure
+    // (write buffer full); log a warning so operators can detect overload.
+    const canContinue = this.writeStream?.write(JSON.stringify(full) + '\n');
+    if (canContinue === false) {
+      logger.warn('[AuditLogger] Write buffer full — back-pressure detected');
+    }
 
     logger.debug(`[Audit] ${full.action} ${full.entity_type}:${full.entity_id}`);
     return full;

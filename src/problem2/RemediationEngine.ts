@@ -5,6 +5,7 @@ import { AuditLogger } from './AuditLogger';
 import { calculateTradePnL, isInOutageWindow } from './PnLCalculator';
 import type {
   AccountBalance,
+  AuditEntry,
   RemediationReport,
   RemediationResult,
   TradeRecord,
@@ -42,18 +43,18 @@ export class RemediationEngine {
   private readonly auditLogger: AuditLogger;
 
   constructor(
-    private trades: TradeRecord[],
-    private balances: AccountBalance[],
+    private readonly trades: TradeRecord[],
+    private readonly balances: AccountBalance[],
     options: RemediationOptions = {},
   ) {
     this.auditLogger = new AuditLogger(options.auditLogDir);
   }
 
-  run(
+  async run(
     windowStart: string,
     windowEnd: string,
     options: RemediationOptions = {},
-  ): RemediationReport {
+  ): Promise<RemediationReport> {
     const runId = uuidv4();
     const dryRun = options.dryRun ?? false;
 
@@ -211,7 +212,7 @@ export class RemediationEngine {
     return this.trades;
   }
 
-  getAuditLog(): ReturnType<AuditLogger['getAll']> {
+  getAuditLog(): readonly AuditEntry[] {
     return this.auditLogger.getAll();
   }
 

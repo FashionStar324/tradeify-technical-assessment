@@ -75,7 +75,7 @@ if (require.main === module) {
 
   p1.start();
 
-  setInterval(() => {
+  const statsTimer = setInterval(() => {
     const stats = p1.ingester.getStats();
     logger.info(
       `[Stats] received=${stats.received} duplicates=${stats.duplicates} ` +
@@ -84,6 +84,7 @@ if (require.main === module) {
   }, 10_000);
 
   process.on('SIGINT', () => {
+    clearInterval(statsTimer);
     p1.stop();
     process.exit(0);
   });

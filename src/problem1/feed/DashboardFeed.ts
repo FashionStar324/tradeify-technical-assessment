@@ -138,7 +138,8 @@ export class DashboardFeed {
     }
 
     const msg = result.data;
-    const subs = this.subscriptions.get(ws)!;
+    const subs = this.subscriptions.get(ws);
+    if (!subs) return; // ws was removed between message receipt and handling
 
     if (msg.subscribe === 'ALL') {
       subs.add('*');

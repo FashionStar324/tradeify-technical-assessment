@@ -76,15 +76,19 @@ app.get('/api/accounts', (req, res) => {
 });
 
 app.get('/api/accounts/:id', (req, res) => {
-  const state = p1.accountEngine.getAccount(req.params['id'] ?? '');
+  const id = req.params['id'];
+  if (!id) return res.status(400).json({ error: 'Missing account ID' });
+  const state = p1.accountEngine.getAccount(id);
   if (!state) return res.status(404).json({ error: 'Account not found' });
   return res.json(p1.accountEngine.toSnapshot(state));
 });
 
 app.post('/api/accounts/:id/unlock', (req, res) => {
-  const ok = p1.accountEngine.unlockAccount(req.params['id'] ?? '');
+  const id = req.params['id'];
+  if (!id) return res.status(400).json({ error: 'Missing account ID' });
+  const ok = p1.accountEngine.unlockAccount(id);
   if (!ok) return res.status(404).json({ error: 'Account not found' });
-  return res.json({ message: `Account ${req.params['id']} unlocked` });
+  return res.json({ message: `Account ${id} unlocked` });
 });
 
 app.get('/api/stats', (_req, res) => {
